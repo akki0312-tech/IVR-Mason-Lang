@@ -1,6 +1,8 @@
 """Audio transcription using Google Cloud Speech-to-Text API."""
 
 import os
+import base64
+import json
 from google.cloud import speech_v1p1beta1 as speech
 from google.oauth2 import service_account
 from dotenv import load_dotenv
@@ -29,18 +31,35 @@ def transcribe_audio(file_path: str, language_code: str = "en-IN") -> str:
 
     try:
         # Load Google Cloud credentials
-        credentials_path = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
-        if not credentials_path:
-            # Fallback: Return helpful message if credentials not set up yet
-            print("[TRANSCRIBE WARNING] GOOGLE_APPLICATION_CREDENTIALS not set")
-            print("[TRANSCRIBE WARNING] Please set up Google Cloud credentials to enable transcription")
-            return "[Transcription unavailable - Please configure Google Cloud credentials]"
+        # PRIORITY 1: Base64 string (for Production/Railway)
+        credentials_base64 = os.getenv("GOOGLE_CREDENTIALS_BASE64")
         
-        if not os.path.exists(credentials_path):
-            print(f"[TRANSCRIBE WARNING] Credentials file not found: {credentials_path}")
-            return "[Transcription unavailable - Google Cloud credentials file not found]"
-        
-        credentials = service_account.Credentials.from_service_account_file(credentials_path)
+        if credentials_base64:
+            try:
+                # Decode base64 to JSON string
+                credentials_json = base64.b64decode(credentials_base64).decode("utf-8")
+                # Parse JSON string to dict
+                credentials_dict = json.loads(credentials_json)
+                # Create credentials object
+                credentials = service_account.Credentials.from_service_account_info(credentials_dict)
+                print("[TRANSCRIBE] Using Base64 credentials")
+            except Exception as e:
+                print(f"[TRANSCRIBE ERROR] Failed to decode base64 credentials: {str(e)}")
+                return "[Transcription unavailable - Invalid Base64 credentials]"
+        else:
+            # PRIORITY 2: File path (for Local Development)
+            credentials_path = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
+            if not credentials_path:
+                print("[TRANSCRIBE WARNING] GOOGLE_APPLICATION_CREDENTIALS not set")
+                return "[Transcription unavailable - Please configure Google Cloud credentials]"
+            
+            if not os.path.exists(credentials_path):
+                print(f"[TRANSCRIBE WARNING] Credentials file not found: {credentials_path}")
+                return "[Transcription unavailable - Google Cloud credentials file not found]"
+            
+            credentials = service_account.Credentials.from_service_account_file(credentials_path)
+            print(f"[TRANSCRIBE] Using credentials file: {credentials_path}")
+
         client = speech.SpeechClient(credentials=credentials)
         
         # Read audio file
