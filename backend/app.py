@@ -1,0 +1,214 @@
+from fastapi import FastAPI, UploadFile, File, Form, Body
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
+import uvicorn
+import os
+import tempfile
+from pydantic import BaseModel
+
+from transcribe_module import transcribe_audio
+from ivr_handler import process_turn, reset_session, get_initial_question
+from data_handler import insert_record_handler
+from database import (
+    get_employer_by_id,
+    add_employer_profile,
+    add_employer_login,
+    checklogin,
+    get_masons,
+    update_contact_status,
+)
+
+app = FastAPI(title="Mason IVR Backend", version="1.0.0")
+
+# CORS middleware for frontend
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+# ==================== Health Check ====================
+@app.get("/health")
+async def health():
+    """Health check endpoint."""
+    return {"status": "ok", "service": "Mason IVR Backend"}
+
+
+# ==================== Models ====================
+class EmployerSignup(BaseModel):
+    """Request model for employer signup."""
+    email: str
+    password: str
+    name: str
+    location: str
+    expected_wage: float
+
+
+# ==================== IVR Endpoints ====================
+@app.post("/ivr")
+async def ivr_endpoint(session_id: str = Form(...), file: UploadFile = File(...)):
+    """Process IVR audio input and return assistant response."""
+    try:
+        print(f"[DEBUG] IVR Request - session_id: {session_id}, file: {file.filename if file else 'None'}")
+        
+        # Validate inputs
+        if not session_id:
+            return {"status": "error", "message": "session_id is required"}
+        if not file:
+            return {"status": "error", "message": "file is required"}
+        
+        # Save temporary audio file
+        suffix = os.path.splitext(file.filename)[-1] or ".webm"
+        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+            content = await file.read()
+            print(f"[DEBUG] File size: {len(content)} bytes")
+            
+            if len(content) == 0:
+                return {"status": "error", "message": "Audio file is empty"}
+            
+            tmp.write(content)
+            temp_audio_path = tmp.name
+
+        # Get language from session for transcription
+        from ivr_handler import SESSIONS
+        from language_config import LANGUAGE_CODES
+        session_language = SESSIONS.get(session_id, {}).get("language", "en")
+        language_code = LANGUAGE_CODES.get(session_language, "en-IN")
+        
+        # Transcribe audio with language-specific model
+        print(f"[DEBUG] Transcribing audio from {temp_audio_path} (language: {session_language})")
+        user_text = transcribe_audio(temp_audio_path, language_code)
+        print(f"[DEBUG] ===== TRANSCRIBED TEXT: '{user_text}' =====")
+        print(f"[DEBUG] Text length: {len(user_text)}, Text repr: {repr(user_text)}")
+
+        # Process user input through IVR logic
+        print(f"[DEBUG] Calling process_turn with session_id={session_id}, user_text='{user_text}'")
+        result = process_turn(session_id, user_text)
+        print(f"[DEBUG] process_turn returned: {result}")
+
+
+        # Save to database if session is finished
+        if result["finished"]:
+            insert_record_handler(result["fields"])
+
+        return {
+            "status": "success",
+            "user_text": user_text,  # Add for debugging
+            "assistant_text": result["assistant_text"],
+            "finished": result["finished"],
+            "fields": result["fields"],
+            "audio_url": f"/audio/{os.path.basename(result['audio_file'])}"
+        }
+
+    except Exception as e:
+        print(f"[ERROR] IVR endpoint error: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return {"status": "error", "message": str(e)}
+
+
+# ==================== Audio Endpoint ====================
+@app.get("/audio/{file_name}")
+async def get_audio(file_name: str):
+    """Serve temporary audio files."""
+    file_path = os.path.join(tempfile.gettempdir(), file_name)
+    return FileResponse(file_path, media_type="audio/mpeg")
+
+
+# ==================== Session Management ====================
+@app.post("/reset")
+async def reset(session_id: str = Form(...)):
+    """Reset IVR session."""
+    reset_session(session_id)
+    return {"status": "success", "message": "Session reset"}
+
+
+@app.post("/ivr/start")
+async def ivr_start(
+    session_id: str = Form(...),
+    language: str = Form(default="en")
+):
+    """Get initial welcome message and first question without audio input."""
+    try:
+        print(f"[DEBUG] IVR Start - session_id: {session_id}, language: {language}")
+        
+        # Get initial question in selected language
+        result = get_initial_question(session_id, language)
+        
+        # Save audio file and return URL
+        audio_file = result["audio_file"]
+        audio_filename = os.path.basename(audio_file)
+        audio_url = f"/audio/{audio_filename}"
+        
+        print(f"[DEBUG] Initial question generated, audio: {audio_url}")
+        
+        return {
+            "assistant_text": result["assistant_text"],
+            "audio_url": audio_url,
+            "finished": result["finished"],
+            "fields": result["fields"]
+        }
+    except Exception as e:
+        print(f"[ERROR] IVR Start failed: {str(e)}")
+        return {"status": "error", "message": str(e)}
+
+
+# ==================== Employer Endpoints ====================
+@app.post("/employer/login")
+async def employer_login(email: str = Form(...), password: str = Form(...)):
+    """Authenticate employer login."""
+    user = checklogin(email, password)
+    if user:
+        return {"status": "success", "verified": True, "employer": user}
+    return {"status": "failed", "verified": False, "message": "Invalid credentials"}
+
+
+@app.post("/employer/signup")
+async def employer_signup(signup: EmployerSignup):
+    """Register new employer account."""
+    try:
+        # Create employer login credentials
+        data = add_employer_login(signup.email, signup.password)
+        emp_id = data[1]
+
+        # Create employer profile
+        add_employer_profile(emp_id, signup.name, signup.location, signup.expected_wage)
+
+        return {"status": "success", "message": "Employer signed up successfully", "emp_id": emp_id}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+
+@app.get("/employer/{emp_id}")
+def get_employer_profile(emp_id: str):
+    """Get employer profile by ID."""
+    employer = get_employer_by_id(emp_id)
+    if not employer:
+        return {"name": "", "email": ""}
+    return {"name": employer["name"], "email": employer["email"]}
+
+
+@app.get("/employer/{emp_id}/masons")
+def get_masons_for_employer(emp_id: str):
+    """Get all collected masons (currently not filtered by employer)."""
+    masons = get_masons()
+    return {"masons": masons}
+
+
+@app.put("/masons/{mason_id}/status")
+def update_mason_status(mason_id: int, payload: dict = Body(...)):
+    """Update mason contact status. Expects { "contact_status": "Contacted" }"""
+    new_status = payload.get("contact_status")
+    if not new_status:
+        return {"status": "error", "updated": False, "message": "contact_status is required"}
+
+    return update_contact_status(mason_id, new_status)
+
+
+# ==================== Run Server ====================
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 8000))
+    uvicorn.run(app, host="0.0.0.0", port=port)   
