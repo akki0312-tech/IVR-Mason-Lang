@@ -45,17 +45,19 @@ def transcribe_audio(file_path: str, language_code: str = "en-IN") -> str:
                 print("[TRANSCRIBE] Using Base64 credentials")
             except Exception as e:
                 print(f"[TRANSCRIBE ERROR] Failed to decode base64 credentials: {str(e)}")
-                return "[Transcription unavailable - Invalid Base64 credentials]"
+                return f"[Transcription unavailable - Base64 decode error: {str(e)}]"
         else:
             # PRIORITY 2: File path (for Local Development)
             credentials_path = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
             if not credentials_path:
                 print("[TRANSCRIBE WARNING] GOOGLE_APPLICATION_CREDENTIALS not set")
-                return "[Transcription unavailable - Please configure Google Cloud credentials]"
+                # Debug info: explicitly state that Base64 var was also missing
+                return "[Transcription unavailable - Credentials missing (Base64 var not set, File path not set)]"
             
             if not os.path.exists(credentials_path):
                 print(f"[TRANSCRIBE WARNING] Credentials file not found: {credentials_path}")
-                return "[Transcription unavailable - Google Cloud credentials file not found]"
+                # Debug info: explicitly state status of both methods
+                return f"[Transcription unavailable - Config error: Base64 var missing, File '{credentials_path}' not found]"
             
             credentials = service_account.Credentials.from_service_account_file(credentials_path)
             print(f"[TRANSCRIBE] Using credentials file: {credentials_path}")
