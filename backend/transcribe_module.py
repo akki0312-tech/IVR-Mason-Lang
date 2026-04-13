@@ -31,10 +31,19 @@ def transcribe_audio(file_path: str, language_code: str = "en-IN") -> str:
 
     try:
         # Load Google Cloud credentials
-        # PRIORITY 1: Base64 string (for Production/Railway)
+        api_key = os.getenv("GOOGLE_API_KEY")
         credentials_base64 = os.getenv("GOOGLE_CREDENTIALS_BASE64")
-        
-        if credentials_base64:
+        credentials_path = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
+
+        if api_key:
+            # PRIORITY 1: Direct API Key (Easiest for Render & Locals)
+            from google.api_core.client_options import ClientOptions
+            client_options = ClientOptions(api_key=api_key)
+            client = speech.SpeechClient(client_options=client_options)
+            print("[TRANSCRIBE] Using simple API Key")
+            
+        elif credentials_base64:
+            # PRIORITY 2: Base64 string (Legacy Production/Railway)
             try:
                 # Decode base64 to JSON string
                 credentials_json = base64.b64decode(credentials_base64).decode("utf-8")
@@ -42,27 +51,25 @@ def transcribe_audio(file_path: str, language_code: str = "en-IN") -> str:
                 credentials_dict = json.loads(credentials_json)
                 # Create credentials object
                 credentials = service_account.Credentials.from_service_account_info(credentials_dict)
+                client = speech.SpeechClient(credentials=credentials)
                 print("[TRANSCRIBE] Using Base64 credentials")
             except Exception as e:
                 print(f"[TRANSCRIBE ERROR] Failed to decode base64 credentials: {str(e)}")
                 return f"[Transcription unavailable - Base64 decode error: {str(e)}]"
-        else:
-            # PRIORITY 2: File path (for Local Development)
-            credentials_path = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
-            if not credentials_path:
-                print("[TRANSCRIBE WARNING] GOOGLE_APPLICATION_CREDENTIALS not set")
-                # Debug info: explicitly state that Base64 var was also missing
-                return "[Transcription unavailable - Credentials missing (Base64 var not set, File path not set)]"
-            
+                
+        elif credentials_path:
+            # PRIORITY 3: File path (Legacy Local Development)
             if not os.path.exists(credentials_path):
                 print(f"[TRANSCRIBE WARNING] Credentials file not found: {credentials_path}")
-                # Debug info: explicitly state status of both methods
-                return f"[Transcription unavailable - Config error: Base64 var missing, File '{credentials_path}' not found]"
+                return f"[Transcription unavailable - Config error: File '{credentials_path}' not found]"
             
             credentials = service_account.Credentials.from_service_account_file(credentials_path)
+            client = speech.SpeechClient(credentials=credentials)
             print(f"[TRANSCRIBE] Using credentials file: {credentials_path}")
-
-        client = speech.SpeechClient(credentials=credentials)
+            
+        else:
+            print("[TRANSCRIBE WARNING] No Google Credentials found (Checked API_KEY, BASE64, and FILE)")
+            return "[Transcription unavailable - No valid credentials found]"
         
         # Read audio file
         with open(file_path, "rb") as audio_file:
